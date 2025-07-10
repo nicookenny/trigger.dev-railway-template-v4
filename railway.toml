@@ -1,0 +1,73 @@
+# railway.toml  ─ template root
+[project]
+name = "trigger-dev-self-hosted"
+
+# ---------- Managed plugins ----------
+[plugins.postgres]
+plan = "starter"   # or "standard" for production
+
+[plugins.redis]
+plan = "starter"
+
+# ---------- Trigger Webapp ----------
+[services.trigger-webapp]
+image = "ghcr.io/triggerdotdev/trigger.dev:v4-beta"
+# Webapp listens on 3000 internally; we publish 8030
+healthcheck = { path = "/healthcheck", scheme = "HTTP", interval = 30 }
+env = { 
+  # DB / cache
+  DATABASE_URL          = "${{plugins.postgres.connectionString}}",
+  REDIS_HOST            = "${{plugins.redis.host}}",
+  REDIS_PORT            = "${{plugins.redis.port}}",
+  REDIS_TLS_DISABLED    = "true",
+  # Storage / registry
+  OBJECT_STORE_BASE_URL = "http://minio:9000",
+  OBJECT_STORE_ACCESS_KEY_ID     = "admin",
+  OBJECT_STORE_SECRET_ACCESS_KEY = "${{secrets.MINIO_PASSWORD}}",
+  DEPLOY_REGISTRY_HOST  = "registry:5000",
+  DOCKER_REGISTRY_URL   = "registry:5000",
+  # House-keeping secrets – generate once & paste in Railway UI
+  SESSION_SECRET        = "${{secrets.SESSION_SECRET}}",
+  MAGIC_LINK_SECRET     = "${{secrets.MAGIC_LINK_SECRET}}",
+  ENCRYPTION_KEY        = "${{secrets.ENCRYPTION_KEY}}",
+  MANAGED_WORKER_SECRET = "${{secrets.MANAGED_WORKER_SECRET}}",
+  # Public URLs (patched later by Railway)
+  APP_ORIGIN  = "https://${{services.trigger-webapp.domain}}",
+  LOGIN_ORIGIN= "https://${{services.trigger-webapp.domain}}",
+  API_ORIGIN  = "https://${{services.trigger-webapp.domain}}/api"
+}
+# Expose 8030 externally
+[[services.trigger-webapp.ports]]
+port = 8030
+scheme = "HTTP"
+
+# ---------- Supervisor / worker ----------
+[services.trigger-supervisor]
+image = "ghcr.io/triggerdotdev/supervisor:v4-beta"
+dependsOn = ["trigger-webapp"]
+env = {
+  TRIGGER_API_URL      = "http://trigger-webapp:3000",
+  OTEL_EXPORTER_OTLP_ENDPOINT = "http://trigger-webapp:3000/otel",
+  DOCKER_REGISTRY_URL  = "registry:5000",
+  TRIGGER_WORKER_TOKEN = "${{secrets.TRIGGER_WORKER_TOKEN}}",
+  MANAGED_WORKER_SECRET= "${{secrets.MANAGED_WORKER_SECRET}}"
+}
+
+# ---------- MinIO ----------
+[services.minio]
+image = "bitnami/minio:latest"
+command = "server /data --console-address ':9001'"
+env = { MINIO_ROOT_USER = "admin", MINIO_ROOT_PASSWORD = "${{secrets.MINIO_PASSWORD}}", MINIO_DEFAULT_BUCKETS = "packets" }
+mounts = [{ source="minio-data", path="/data" }]
+[[services.minio.ports]]
+port = 9001
+scheme = "HTTP"     # Web console
+
+# ---------- Internal Docker registry ----------
+[services.registry]
+image = "registry:2"
+env = { REGISTRY_AUTH="htpasswd", REGISTRY_AUTH_HTPASSWD_REALM="Registry Realm", REGISTRY_AUTH_HTPASSWD_PATH="/auth/htpasswd" }
+mounts = [{ source="registry-data", path="/var/lib/registry" }]
+[[services.registry.ports]]
+port = 5000
+scheme = "HTTP"
